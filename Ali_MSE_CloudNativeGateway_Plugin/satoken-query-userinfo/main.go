@@ -81,10 +81,10 @@ func onHttpRequestHeaders(ctx wrapper.HttpContext, config MyConfig, log wrapper.
 			log.Critical(trace_str + "GetHttpRequestHeader failed not find Host")
 			return types.ActionContinue
 		} else {
-			if strings.EqualFold(Host, "api-gateway.ab-inbev.cn") {
+			if strings.EqualFold(Host, "api-gateway.domain.cn") {
 				Host_env = "prod"
 			} else {
-				//api-gateway-dev.ab-inbev.cn
+				//api-gateway-dev.domain.cn
 				if len(strings.Split(Host, ".")) != 3 || !strings.Contains(Host, "api-gateway-") {
 					log.Critical(trace_str + "Host Split failed")
 					return types.ActionContinue
