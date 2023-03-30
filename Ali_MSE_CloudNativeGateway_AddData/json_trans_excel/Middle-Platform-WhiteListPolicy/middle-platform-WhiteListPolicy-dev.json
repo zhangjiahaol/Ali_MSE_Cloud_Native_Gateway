@@ -1,0 +1,5 @@
+[
+    "POST#/abi-cloud-isales-task-service/api/picture/service/queryPictureList",
+    "POST#/abi-cloud-middle-platform-image-recognize-service/recognize/callback/**"
+
+]

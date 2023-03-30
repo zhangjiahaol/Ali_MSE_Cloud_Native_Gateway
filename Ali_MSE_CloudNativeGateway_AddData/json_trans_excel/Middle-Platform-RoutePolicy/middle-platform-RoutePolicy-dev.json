@@ -1,0 +1,11 @@
+[
+   {
+        "path": "/bees-mall-service/**",
+        "uri": "http://bees-mall-service:8080",
+        "stripPrefix": 1
+    },
+    {
+        "path": "/abi-cloud-bees-poc-bff/**",
+        "uri": "http://abi-cloud-bees-poc-bff:8080"
+    }
+]

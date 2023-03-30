@@ -1,0 +1,123 @@
+package main
+
+import (
+	"errors"
+
+	"encoding/json"
+
+	"github.com/alibaba/higress/plugins/wasm-go/pkg/wrapper"
+	"github.com/tetratelabs/proxy-wasm-go-sdk/proxywasm"
+	"github.com/tetratelabs/proxy-wasm-go-sdk/proxywasm/types"
+	"github.com/tidwall/gjson"
+)
+
+func main() {
+	wrapper.SetCtx(
+		"gw-error-format",
+		wrapper.ParseConfigBy(parseConfig),
+		wrapper.ProcessResponseHeadersBy(onHttpResponseHeader),
+		wrapper.ProcessResponseBodyBy(onHttpResponseBody),
+	)
+}
+
+type MyConfig struct {
+	Rules []struct {
+		Match struct {
+			Responsebody string `json:"responsebody"`
+			Statuscode   string `json:"statuscode"`
+		} `json:"match"`
+		Replace struct {
+			Responsebody string `json:"responsebody"`
+			Statuscode   string `json:"statuscode"`
+		} `json:"replace"`
+	} `json:"rules"`
+	Set_header []map[string]interface{} `json:"set_header"`
+}
+
+func parseConfig(gjson gjson.Result, config *MyConfig, log wrapper.Log) error {
+	log.Info(gjson.Raw)
+	log.Info(gjson.Get("rules").String())
+	log.Info(gjson.Get("set_header").String())
+
+	err := json.Unmarshal([]byte(gjson.Raw), &config)
+	if err != nil {
+		return errors.New("Unmarshal fail" + err.Error())
+	}
+
+	for _, item := range config.Rules {
+		if item.Match.Statuscode == "" {
+			return errors.New("missing rules.match.statuscode in config")
+		}
+		if item.Replace.Statuscode == "" {
+			return errors.New("missing rules.replace.statuscode in config")
+		}
+	}
+
+	return nil
+}
+
+func onHttpResponseHeader(ctx wrapper.HttpContext, config MyConfig, log wrapper.Log) types.Action {
+	var DontReadResponseBody = false
+	//////// judge statuscode
+	for _, item := range config.Rules {
+		current_statuscode, err := proxywasm.GetHttpResponseHeader(":status")
+		if err != nil {
+			log.Critical("failed GetHttpResponseHeader :status")
+		}
+		config_match_statuscode := item.Match.Statuscode
+		config_replace_statuscode := item.Replace.Statuscode
+
+		switch current_statuscode {
+		//case "403", "503":
+		case config_match_statuscode:
+			// X-enge-upward-service-time If the ResponseHeader is not found, it is not forwarded to the back-end service
+			x_envoy_upstream_service_time, err := proxywasm.GetHttpResponseHeader("x-envoy-upstream-service-time")
+			if x_envoy_upstream_service_time == "" || len(x_envoy_upstream_service_time) < 1 || err != nil {
+				proxywasm.RemoveHttpResponseHeader("content-length")
+				// replace statuscode
+				err = proxywasm.ReplaceHttpResponseHeader(":status", config_replace_statuscode)
+				if err != nil {
+					log.Critical("failed ReplaceHttpResponseHeader :status")
+				}
+				// replace ResponseHeader
+				for _, item_header := range config.Set_header {
+					for key, value := range item_header {
+						err := proxywasm.ReplaceHttpResponseHeader(key, value.(string))
+						if err != nil {
+							log.Critical("failed ReplaceHttpResponseHeader")
+						}
+					}
+				}
+			}
+			return types.ActionContinue
+		default:
+			DontReadResponseBody = true
+		}
+	}
+
+	if DontReadResponseBody == true {
+		ctx.DontReadResponseBody()
+	}
+	return types.ActionContinue
+}
+
+func onHttpResponseBody(ctx wrapper.HttpContext, config MyConfig, body []byte, log wrapper.Log) types.Action {
+	bodyStr := string(body)
+
+	//////// judge responsebody
+	for _, item := range config.Rules {
+		config_match_responsebody := item.Match.Responsebody
+		config_replace_responsebody := item.Replace.Responsebody
+		if bodyStr == config_match_responsebody {
+			log.Info(bodyStr)
+			// Replace ResponseBody
+			err := proxywasm.ReplaceHttpResponseBody([]byte(config_replace_responsebody))
+			if err != nil {
+				log.Critical("failed config_replace_responsebody" + config_replace_responsebody)
+			}
+			return types.ActionContinue
+		}
+	}
+
+	return types.ActionContinue
+}

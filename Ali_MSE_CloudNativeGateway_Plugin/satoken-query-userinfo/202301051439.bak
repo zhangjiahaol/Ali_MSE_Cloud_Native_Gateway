@@ -1,0 +1,258 @@
+package main
+
+import (
+	"encoding/base64"
+	"strings"
+
+	"github.com/tidwall/gjson"
+
+	"github.com/tetratelabs/proxy-wasm-go-sdk/proxywasm"
+	"github.com/tetratelabs/proxy-wasm-go-sdk/proxywasm/types"
+)
+
+func main() {
+	proxywasm.SetVMContext(&vmContext{})
+}
+
+type vmContext struct {
+	// Embed the default VM context here,
+	// so that we don't need to reimplement all the methods.
+	types.DefaultVMContext
+}
+
+// Override types.DefaultVMContext.
+func (*vmContext) NewPluginContext(contextID uint32) types.PluginContext {
+	return &pluginContext{}
+}
+
+type pluginContext struct {
+	// Embed the default plugin context here,
+	// so that we don't need to reimplement all the methods.
+	types.DefaultPluginContext
+	configuration pluginConfiguration
+	contextID     uint32
+	callBack      func(numHeaders, bodySize, numTrailers int)
+	cnt           int
+}
+
+// pluginConfiguration is a type to represent an example configuration for this wasm plugin.
+type pluginConfiguration struct {
+}
+
+// Override types.DefaultPluginContext.
+func (ctx *pluginContext) OnPluginStart(pluginConfigurationSize int) types.OnPluginStartStatus {
+	data, err := proxywasm.GetPluginConfiguration()
+	if err != nil && err != types.ErrorStatusNotFound {
+		proxywasm.LogCriticalf("error reading plugin configuration: %v", err)
+		return types.OnPluginStartStatusFailed
+	}
+	config, err := parsePluginConfiguration(data)
+	if err != nil {
+		proxywasm.LogCriticalf("error parsing plugin configuration: %v", err)
+		return types.OnPluginStartStatusFailed
+	}
+	ctx.configuration = config
+	return types.OnPluginStartStatusOK
+}
+
+// parsePluginConfiguration parses the json plugin confiuration data and returns pluginConfiguration.
+// Note that this parses the json data by gjson, since TinyGo doesn't support encoding/json.
+// You can also try https://github.com/mailru/easyjson, which supports decoding to a struct.
+func parsePluginConfiguration(data []byte) (pluginConfiguration, error) {
+	return pluginConfiguration{}, nil
+}
+
+// Override types.DefaultPluginContext.
+func (ctx *pluginContext) NewHttpContext(contextID uint32) types.HttpContext {
+	return &httpContext{contextID: contextID}
+}
+
+type httpContext struct {
+	// Embed the default http context here,
+	// so that we don't need to reimplement all the methods.
+	types.DefaultHttpContext
+	contextID uint32
+}
+
+// Override types.DefaultHttpContext.
+func (ctx *httpContext) OnHttpRequestHeaders(numHeaders int, endOfStream bool) types.Action {
+	proxywasm.LogInfo("---------OnHttpRequestHeaders start-----------")
+
+	////set request header gateway_start:gateway_start
+	proxywasm.LogInfo("AddHttpRequestHeader: gateway_start:gateway_start")
+	err := proxywasm.AddHttpRequestHeader("gateway_start", "gateway_start")
+	if err != nil {
+		proxywasm.LogCritical("failed to set request header gateway_start:gateway_start")
+	}
+
+	//////////////GetHttpRequestHeader satoken payload loginId
+	satoken, err := proxywasm.GetHttpRequestHeader("satoken")
+	if err != nil || strings.EqualFold(satoken, "") || len(satoken) == 0 {
+		proxywasm.LogInfo("GetHttpRequestHeader not find satoken")
+		////set request header gateway_end:not find satoken go by authentoken
+		proxywasm.AddHttpRequestHeader("gateway_end", "gateway_end")
+		proxywasm.LogInfo("---------OnHttpRequestHeaders end-----------")
+		return types.ActionContinue
+	} else {
+		proxywasm.LogInfo("go by Forward policy satoken: " + satoken)
+
+		//use dot "." split satoken
+		//--header "satoken:eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJsb2dpbklkIjoyNjM5Mywicm4iOiJtWjNBV2FrRlE1cDV6ZGtwcHp6NUZWZjMzZkU2amwwbiIsImlzcyI6Imh0dHBzOi8vd3d3LmFiLWluYmV2LmNuLyIsInN1YiI6Imh0dHBzOi8vd3d3LmFiLWluYmV2LmNuLyJ9.FUW8HDpj3xshTVSABXuQhxJt3IMue6k_TljYWEv4sDs"
+		var payload = ""
+		if len(strings.Split(satoken, ".")) != 3 {
+			proxywasm.LogCritical("satoken Split failed, Invalid satoken")
+			proxywasm.AddHttpRequestHeader("gateway_end", "gateway_end")
+			return types.ActionContinue
+		} else {
+			payload = strings.Split(satoken, ".")[1]
+			proxywasm.LogInfo("payload: " + payload)
+		}
+
+		payload_decode, err := base64.RawURLEncoding.DecodeString(payload)
+		if err != nil {
+			proxywasm.LogCritical("base64 parse error: " + err.Error())
+			proxywasm.AddHttpRequestHeader("gateway_log", "base64 parse error")
+			return types.ActionContinue
+		}
+		proxywasm.LogInfo("payload_decode: " + string(payload_decode))
+
+		//parse payload get userLoginId
+		if !gjson.ValidBytes(payload_decode) {
+			proxywasm.LogCritical("Error gjson.ValidBytes")
+			proxywasm.AddHttpRequestHeader("gateway_log", "parse satoken gjson ValidBytes failed")
+			return types.ActionContinue
+		}
+		loginId := gjson.Get(string(payload_decode), "loginId").String()
+		proxywasm.LogInfo("loginId: " + loginId)
+		if loginId == "" || len(loginId) == 0 {
+			proxywasm.LogCritical("Error gjson.Get loginId: " + loginId)
+			proxywasm.AddHttpRequestHeader("gateway_log", "parse satoken gjson Get loginId failed")
+			return types.ActionContinue
+		}
+
+		proxywasm.LogInfo("AddHttpRequestHeader: userLoginId:" + loginId)
+		err = proxywasm.AddHttpRequestHeader("userLoginId", loginId)
+		if err != nil {
+			proxywasm.LogCritical("failed to set request header userLoginId:" + loginId)
+		}
+
+		//get Host header split env
+		proxywasm.LogInfo("---------------------get Host request header------------------------")
+		var Host_env = ""
+		Host, err := proxywasm.GetHttpRequestHeader("Host")
+		if err != nil || strings.EqualFold(Host, "") || len(Host) == 0 {
+			proxywasm.LogCritical("GetHttpRequestHeader failed not find Host")
+			return types.ActionContinue
+		} else {
+			if strings.EqualFold(Host, "api-gateway.ab-inbev.cn") {
+				Host_env = "prod"
+			} else {
+				//api-gateway-dev.ab-inbev.cn
+				if len(strings.Split(Host, ".")) != 3 || !strings.Contains(Host, "api-gateway-") {
+					proxywasm.LogCritical("Host Split failed")
+					return types.ActionContinue
+				} else {
+					//api-gateway-dev
+					domain_name_prefix := strings.Split(Host, ".")[0]
+					//dev
+					Host_env = strings.Split(domain_name_prefix, "api-gateway-")[1]
+				}
+			}
+			err = proxywasm.AddHttpRequestHeader("Host_env", Host_env)
+			if err != nil {
+				proxywasm.LogCritical("failed to set request header Host_env:" + Host_env)
+			}
+		}
+
+		////////////Request get http interface field: employeeNo,roleList
+		headers := [][2]string{
+			{":method", "GET"}, {":authority", "abi-cloud-middle-platform-auth-service-server." + Host_env + ".svc.cluster.local"}, {"accept", "*/*"}, {":path", "/abi-cloud-middle-platform-auth-service/login/get/user?userLoginId=" + loginId},
+		}
+		proxywasm.LogInfo("--------DispatchHttpCall--------")
+		//The service is invoked by k8S service name
+		if _, err := proxywasm.DispatchHttpCall("outbound|8080||abi-cloud-middle-platform-auth-service-server."+Host_env+".svc.cluster.local", headers, nil, nil,
+			3000, func(numHeaders, bodySize, numTrailers int) {
+				proxywasm.LogInfo("---------httpCallResponseCallback start-----------")
+
+				//////////////////////////////////////////////test step set request header
+				proxywasm.AddHttpRequestHeader("step1", "step1")
+
+				proxywasm.SetEffectiveContext(ctx.contextID)
+				ResponseBody, err := proxywasm.GetHttpCallResponseBody(0, bodySize)
+				if err != nil {
+					proxywasm.LogCriticalf("failed to get response body: %v", err)
+					proxywasm.ResumeHttpRequest()
+					return
+				}
+				clusterRequestContent := string(ResponseBody)
+				proxywasm.LogInfo(clusterRequestContent)
+
+				proxywasm.LogInfo("----------clusterRequestContent: " + clusterRequestContent)
+
+				//////////////////////////////////////////////test step set request header
+				proxywasm.AddHttpRequestHeader("step2", "step2")
+
+				////////Gjson parse ResponseBody
+				code_status := gjson.Get(clusterRequestContent, "code").String()
+				SALES_MAN_CODE := gjson.Get(clusterRequestContent, "data.employeeNo").String()
+				roleIds := gjson.Get(clusterRequestContent, "data.userRoles").String()
+				userId := gjson.Get(clusterRequestContent, "data.userId").String()
+
+				proxywasm.AddHttpRequestHeader("AuthServiceStatus", code_status)
+				if err != nil {
+					proxywasm.ResumeHttpRequest()
+					proxywasm.LogCritical("AuthServiceStatus failed to set request header")
+					return
+				}
+
+				////set request header roleIds
+				proxywasm.LogInfo("AddHttpRequestHeader: roleIds:" + roleIds)
+				err = proxywasm.AddHttpRequestHeader("roleIds", roleIds)
+				if err != nil {
+					proxywasm.ResumeHttpRequest()
+					proxywasm.LogCritical("roleIds failed to set request header")
+					return
+				}
+
+				////set request header SALES_MAN_CODE
+				proxywasm.LogInfo("AddHttpRequestHeader: SALES_MAN_CODE:" + SALES_MAN_CODE)
+				err = proxywasm.AddHttpRequestHeader("SALES_MAN_CODE", SALES_MAN_CODE)
+				if err != nil {
+					proxywasm.ResumeHttpRequest()
+					proxywasm.LogCritical("SALES_MAN_CODE failed to set request header")
+					return
+				}
+
+				////set request header userId
+				proxywasm.LogInfo("AddHttpRequestHeader: userId:" + userId)
+				err = proxywasm.AddHttpRequestHeader("userId", userId)
+				if err != nil {
+					proxywasm.ResumeHttpRequest()
+					proxywasm.LogCritical("userId failed to set request header")
+					return
+				}
+
+				//////////////////////////////////////////////test step set request header
+				proxywasm.AddHttpRequestHeader("step3", "step3")
+
+				proxywasm.AddHttpRequestHeader("gateway_end", "gateway_end")
+
+				proxywasm.ResumeHttpRequest()
+				proxywasm.LogInfo("---------httpCallResponseCallback end-----------")
+			}); err != nil {
+			proxywasm.LogCriticalf("dipatch httpcall failed: %v", err)
+			proxywasm.AddHttpRequestHeader("gateway_log", "dipatch httpcall failed")
+			return types.ActionContinue
+		}
+	}
+
+	////set request header gateway_end
+	proxywasm.LogInfo("AddHttpRequestHeader: gateway_end:gateway_end")
+	err = proxywasm.AddHttpRequestHeader("gateway_end", "gateway_end")
+	if err != nil {
+		proxywasm.LogCritical("failed to set request header gateway_end:gateway_end")
+	}
+
+	proxywasm.LogInfo("---------OnHttpRequestHeaders end-----------")
+	return types.ActionPause
+}
